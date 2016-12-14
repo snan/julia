@@ -212,8 +212,14 @@ sleep(0.5) # to ensure that wid2 messages have been executed on wid1
 @test remotecall_fetch(k->haskey(Base.PGRP.refs, k), wid1, rrid) == false
 
 @test fetch(@spawnat id_other myid()) == id_other
-@test @fetchfrom id_other begin myid() end == id_other
-@fetch begin myid() end
+@test (@fetchfrom id_other myid()) == id_other
+
+pids=[]
+for i in 1:nworkers()
+    push!(pids, @fetch myid())
+end
+@test sort(pids) == sort(workers())
+
 
 # test getindex on Futures and RemoteChannels
 function test_indexing(rr)
@@ -464,25 +470,27 @@ for T in [Void, ShmemFoo]
 end
 
 # Issue #14664
-d = SharedArray(Int,10)
-@sync @parallel for i=1:10
-    d[i] = i
-end
+let
+    local d = SharedArray(Int,10)
+    @sync @parallel for i=1:10
+        d[i] = i
+    end
 
-for (x,i) in enumerate(d)
-    @test x == i
-end
+    for (x,i) in enumerate(d)
+        @test x == i
+    end
 
-# complex
-sd = SharedArray(Int,10)
-se = SharedArray(Int,10)
-@sync @parallel for i=1:10
-    sd[i] = i
-    se[i] = i
-end
-sc = complex(sd,se)
-for (x,i) in enumerate(sc)
-    @test i == complex(x,x)
+    # complex
+    local sd = SharedArray(Int,10)
+    local se = SharedArray(Int,10)
+    @sync @parallel for i=1:10
+        sd[i] = i
+        se[i] = i
+    end
+    sc = complex(sd,se)
+    for (x,i) in enumerate(sc)
+        @test i == complex(x,x)
+    end
 end
 
 # Once finalized accessing remote references and shared arrays should result in exceptions.
@@ -533,13 +541,14 @@ num_small_requests = 10000
 
 # test parallel sends of large arrays from multiple tasks to the same remote worker
 ntasks = 10
-rr_list = [Channel(32) for x in 1:ntasks]
-a = ones(2*10^5)
+rr_list = [Channel(1) for x in 1:ntasks]
+
 for rr in rr_list
-    @async let rr=rr
-        try
+    let rr=rr
+        @async try
             for i in 1:10
-                @test a == remotecall_fetch((x)->x, id_other, a)
+                a = rand(2*10^5)
+                @test a == remotecall_fetch(x->x, id_other, a)
                 yield()
             end
             put!(rr, :OK)
@@ -1123,17 +1132,19 @@ remotecall_fetch(()->eval(:(f16091b = () -> 2)), wid)
 
 
 # issue #16451
-rng=RandomDevice()
-retval = @parallel (+) for _ in 1:10
-    rand(rng)
-end
-@test retval > 0.0 && retval < 10.0
+let
+    local rng=RandomDevice()
+    retval = @parallel (+) for _ in 1:10
+        rand(rng)
+    end
+    @test retval > 0.0 && retval < 10.0
 
-rand(rng)
-retval = @parallel (+) for _ in 1:10
     rand(rng)
+    retval = @parallel (+) for _ in 1:10
+        rand(rng)
+    end
+    @test retval > 0.0 && retval < 10.0
 end
-@test retval > 0.0 && retval < 10.0
 
 # serialization tests
 wrkr1 = workers()[1]

@@ -3488,16 +3488,6 @@ let T=TypeVar(:T,true)
     @test typeintersect(Tuple{Type{T},T}, Tuple{Type{Type{Float64}},Type{Int}}) === Union{}
 end
 
-# issue 13855
-macro m13855()
-    Expr(:localize, :(() -> $(esc(:x))))
-end
-@noinline function foo13855(x)
-    @m13855()
-end
-@test foo13855(+)() == +
-@test foo13855(*)() == *
-
 # issue #8487
 @test [x for x in 1:3] == [x for x ∈ 1:3] == [x for x = 1:3]
 let A = Array{Int}(4,3)
