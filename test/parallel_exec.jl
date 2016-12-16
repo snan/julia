@@ -470,27 +470,25 @@ for T in [Void, ShmemFoo]
 end
 
 # Issue #14664
-let
-    local d = SharedArray(Int,10)
-    @sync @parallel for i=1:10
-        d[i] = i
-    end
+d = SharedArray(Int,10)
+@sync @parallel for i=1:10
+    d[i] = i
+end
 
-    for (x,i) in enumerate(d)
-        @test x == i
-    end
+for (x,i) in enumerate(d)
+    @test x == i
+end
 
-    # complex
-    local sd = SharedArray(Int,10)
-    local se = SharedArray(Int,10)
-    @sync @parallel for i=1:10
-        sd[i] = i
-        se[i] = i
-    end
-    sc = complex(sd,se)
-    for (x,i) in enumerate(sc)
-        @test i == complex(x,x)
-    end
+# complex
+sd = SharedArray(Int,10)
+se = SharedArray(Int,10)
+@sync @parallel for i=1:10
+    sd[i] = i
+    se[i] = i
+end
+sc = complex(sd,se)
+for (x,i) in enumerate(sc)
+    @test i == complex(x,x)
 end
 
 # Once finalized accessing remote references and shared arrays should result in exceptions.
@@ -1128,23 +1126,24 @@ remotecall_fetch(()->eval(:(f16091a() = 2)), wid)
 f16091b = () -> 1
 remotecall_fetch(()->eval(:(f16091b = () -> 2)), wid)
 @test remotecall_fetch(f16091b, 2) === 1
-@test remotecall_fetch((myid)->remotecall_fetch(f16091b, myid), wid, myid()) === 2
+
+# FIXME: What is being tested here? Why the difference between named and anonymous functions?
+@test remotecall_fetch((myid)->remotecall_fetch(f16091b, myid), wid, myid()) === 1
+
 
 
 # issue #16451
-let
-    local rng=RandomDevice()
-    retval = @parallel (+) for _ in 1:10
-        rand(rng)
-    end
-    @test retval > 0.0 && retval < 10.0
-
+rng=RandomDevice()
+retval = @parallel (+) for _ in 1:10
     rand(rng)
-    retval = @parallel (+) for _ in 1:10
-        rand(rng)
-    end
-    @test retval > 0.0 && retval < 10.0
 end
+@test retval > 0.0 && retval < 10.0
+
+rand(rng)
+retval = @parallel (+) for _ in 1:10
+    rand(rng)
+end
+@test retval > 0.0 && retval < 10.0
 
 # serialization tests
 wrkr1 = workers()[1]
@@ -1261,3 +1260,89 @@ function test_add_procs_threaded_blas()
     rmprocs(processes_added)
 end
 test_add_procs_threaded_blas()
+
+# Auto serialization of globals from Main.
+# bitstypes
+global v1 = 1
+@test remotecall_fetch(()->v1, id_other) == v1
+@test remotecall_fetch(()->isdefined(Main, :v1), id_other) == true
+v1 = 2
+@test remotecall_fetch(()->v1, id_other) == 2
+
+# non-bitstypes
+global v2 = ones(10)
+for i in 1:5
+    v2[i] = i
+    @test remotecall_fetch(()->v2, id_other) == v2
+end
+
+# nested anon functions
+global f1 = x->x
+global f2 = x->f1(x)
+v = rand()
+@test remotecall_fetch(f2, id_other, v) == v
+@test remotecall_fetch(x->f2(x), id_other, v) == v
+
+# consts
+const c1 = ones(10)
+@test remotecall_fetch(()->c1, id_other) == c1
+@test remotecall_fetch(()->isconst(Main, :c1), id_other) == true
+
+# Test same call with local vars
+function wrapped_var_ser_tests()
+    # bitstypes
+    local lv1 = 1
+    @test remotecall_fetch(()->lv1, id_other) == lv1
+    @test remotecall_fetch(()->isdefined(Main, :lv1), id_other) == false
+    lv1 = 2
+    @test remotecall_fetch(()->lv1, id_other) == 2
+
+    # non-bitstypes
+    local lv2 = ones(10)
+    for i in 1:5
+        lv2[i] = i
+        @test remotecall_fetch(()->lv2, id_other) == lv2
+    end
+
+    # nested anon functions
+    local lf1 = x->x
+    local lf2 = x->lf1(x)
+    v = rand()
+    @test remotecall_fetch(lf2, id_other, v) == v
+    @test remotecall_fetch(x->lf2(x), id_other, v) == v
+end
+
+wrapped_var_ser_tests()
+
+# reported github issues - Mostly tests with globals and various parallel macros
+#2669, #5390
+v2669=10
+@test fetch(@spawn (1+v2669)) == 10
+
+#12367
+refs = []
+if true
+    n = 10
+    for (idx,p) in enumerate(procs())
+        ref[idx] = @spawnat p begin
+            @sync for i in 1:n
+                nothing
+            end
+        end
+    end
+end
+foreach(wait, refs)
+
+#14399
+s = convert(SharedArray, [1,2,3,4]);
+@test pmap(i->length(s), 1:2) == [4,4]
+
+#6760
+if true
+    a = 2
+    x = @parallel (vcat) for k=1:2
+        sin(a)
+    end
+end
+@test x == map(_->sin(2), 1:2)
+
