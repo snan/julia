@@ -5,25 +5,30 @@ A type of token in a date time string
 
 each subtype must define
 
-    tryparsenext(t::TokenType, str, i, [locale])
+    tryparsenext(t::DatePart, str, i, len, [locale])
 
 and
 
-    format(io, t::TokenType, [locale])
+    format(io, t::TokenType, dt, [locale])
 """
 abstract AbstractDateToken
+
+# fallback to tryparsenext/format methods that don't care about locale
+@inline function tryparsenext(d::AbstractDateToken, str, i, len, locale)
+    tryparsenext(d, str, i, len)
+end
+
+@inline function format(io, d::AbstractDateToken, dt, locale)
+    format(io, d, dt)
+end
 
 """
 Information for parsing and formatting date time values.
 """
-immutable DateFormat{T<:Tuple, N}
+immutable DateFormat{T<:Tuple}
     tokens::T
     locale::DateLocale
-    field_defaults::NTuple{N, Int}
-    field_order::NTuple{N,Int}
 end
-
-include("io-util.jl")
 
 ### Token types ###
 
@@ -35,42 +40,8 @@ end
 @inline min_width(d::DatePart) = d.fixed ? d.width : 1
 @inline max_width(d::DatePart) = d.fixed ? d.width : 0
 
-### Numeric tokens
-
-for c in "yYmdHMS"
-    @eval begin
-        @inline function tryparsenext(d::DatePart{$c}, str, i, len)
-            tryparsenext_base10(str, i, len, min_width(d), max_width(d))
-        end
-    end
-end
-
-@inline function tryparsenext(d::DatePart{'s'}, str, i, len)
-    ms, ii = tryparsenext_base10(str, i, len, min_width(d), max_width(d))
-    if !isnull(ms)
-        ms = Nullable{Int}(get(ms) * 10 ^ (3 - (ii - i)))
-    end
-    return ms, ii
-end
-
-for (c, fn) in zip("YmdHMS", [year, month, day, hour, minute, second])
-    @eval function format(io, d::DatePart{$c}, dt, locale)
-        write(io, minwidth($fn(dt), d.width))
-    end
-end
-
-# special cases
-
-function format(io, d::DatePart{'y'}, dt, locale)
-    write(io, rfixwidth(year(dt), d.width))
-end
-
-function format(io, d::DatePart{'s'}, dt, locale)
-    write(io, string(millisecond(dt)/1000)[3:end])
-end
-
 function _show_content{c}(io::IO, d::DatePart{c})
-    for i=1:d.width
+    for i = 1:d.width
         write(io, c)
     end
 end
@@ -81,33 +52,45 @@ function Base.show{c}(io::IO, d::DatePart{c})
     write(io, ")")
 end
 
+### Parse tokens
 
-# fallback to tryparsenext methods that don't care about locale
-@inline function tryparsenext(d::AbstractDateToken, str, i, len, locale)
-    tryparsenext(d, str, i, len)
-end
-
-function month_to_value(word, locale::DateLocale)
-    get(locale.month_to_value, word, 0)
-end
-
-function month_to_value_abbr(word, locale::DateLocale)
-    get(locale.month_to_value_abbr, word, 0)
-end
-
-for (tok, fn) in zip("uU", [month_to_value_abbr, month_to_value])
-    @eval @inline function tryparsenext(d::DatePart{$tok}, str, i, len, locale)
-        R = Nullable{Int}
-        c, ii = tryparsenext_word(str, i, len, locale, max_width(d))
-        word = str[i:ii-1]
-        x = $fn(lowercase(word), locale)
-        ((x == 0 ? R() : R(x)), ii)
+for c in "yYmdHMS"
+    @eval begin
+        @inline function tryparsenext(d::DatePart{$c}, str, i, len)
+            tryparsenext_base10(str, i, len, min_width(d), max_width(d))
+        end
     end
 end
 
-# ignore day of week while parsing
-@inline function tryparsenext(::Union{DatePart{'e'}, DatePart{'E'}}, str, i, len, locale)
-    tryparsenext_word(str, i, len, locale)
+for (tok, fn) in zip("uUeE", [monthabbr_to_value, monthname_to_value, dayabbr_to_value, dayname_to_value])
+    @eval @inline function tryparsenext(d::DatePart{$tok}, str, i, len, locale)
+        word, i = tryparsenext_word(str, i, len, locale, max_width(d))
+        val = isnull(word) ? 0 : $fn(get(word), locale)
+        return Nullable{Int64}(val == 0 ? nothing : val), i
+    end
+end
+
+@inline function tryparsenext(d::DatePart{'s'}, str, i, len)
+    ms, ii = tryparsenext_base10(str, i, len, min_width(d), max_width(d))
+    if !isnull(ms)
+        ms = Nullable{Int64}(get(ms) * 10 ^ (3 - (ii - i)))
+    end
+    return ms, ii
+end
+
+
+### Format tokens
+
+for (c, fn) in zip("YmdHMS", [year, month, day, hour, minute, second])
+    @eval function format(io, d::DatePart{$c}, dt)
+        write(io, minwidth($fn(dt), d.width))
+    end
+end
+
+for (tok, fn) in zip("uU", [monthabbr, monthname])
+    @eval function format(io, d::DatePart{$tok}, dt, locale)
+        write(io, $fn(month(dt), locale))
+    end
 end
 
 for (tok, fn) in zip("eE", [dayabbr, dayname])
@@ -116,23 +99,27 @@ for (tok, fn) in zip("eE", [dayabbr, dayname])
     end
 end
 
-for (tok, fn) in zip("uU", [monthabbr, monthname])
-    @eval function format(io, d::DatePart{$tok}, dt, locale::DateLocale)
-        write(io, $fn(month(dt), locale))
-    end
+function format(io, d::DatePart{'y'}, dt)
+    write(io, rfixwidth(year(dt), d.width))
+end
+
+function format(io, d::DatePart{'s'}, dt)
+    write(io, string(millisecond(dt)/1000)[3:end])
 end
 
 
 ### Delimiters
 
-immutable Delim{T, length} <: AbstractDateToken d::T end
+immutable Delim{T, length} <: AbstractDateToken
+    d::T
+end
 
 Delim(c::Char, n) = Delim{Char, n}(c)
 Delim(c::Char) = Delim(c,1)
 Delim{S<:AbstractString}(str::S) = Delim{S,length(str)}(str)
 
 @inline function tryparsenext{N}(d::Delim{Char,N}, str, i::Int, len)
-    R = Nullable{Int}
+    R = Nullable{Int64}
     for j=1:N
         i > len && return (R(), i)
         c, i = next(str, i)
@@ -142,7 +129,7 @@ Delim{S<:AbstractString}(str::S) = Delim{S,length(str)}(str)
 end
 
 @inline function tryparsenext{N}(d::Delim{String,N}, str, i::Int, len)
-    R = Nullable{Int}
+    R = Nullable{Int64}
     i1=i
     i2=start(d.d)
     for j=1:N
@@ -158,15 +145,14 @@ end
     return R(0), i1
 end
 
-function format(io, d::Delim, str, i)
+function format(io, d::Delim, dt, locale)
     write(io, d.d)
 end
 
 function _show_content{N}(io::IO, d::Delim{Char, N})
     if d.d in keys(SLOT_RULE)
         for i=1:N
-            write(io, '\\')
-            write(io, d.d)
+            write(io, '\\', d.d)
         end
     else
         for i=1:N
@@ -210,8 +196,16 @@ const SLOT_RULE = Dict{Char, Type}(
     's' => Millisecond,
 )
 
+slot_order(::Type{Date}) = (Year, Month, Day)
+slot_order(::Type{DateTime}) = (Year, Month, Day, Hour, Minute, Second, Millisecond)
+
+slot_defaults(::Type{Date}) = map(Int64, (1, 1, 1))
+slot_defaults(::Type{DateTime}) = map(Int64, (1, 1, 1, 0, 0, 0, 0))
+
+slot_types{T<:TimeType}(::Type{T}) = typeof(slot_defaults(T))
+
 """
-    DateFormat(format::AbstractString, locale="english", default_fields::Type=(1,1,1,0,0,0,0)) -> DateFormat
+    DateFormat(format::AbstractString, locale="english", default_fields=(1,1,1,0,0,0,0)) -> DateFormat
 
 Construct a date formatting object that can be used for parsing date strings or
 formatting a date object as a string. The following character codes can be used to construct the `format`
@@ -245,16 +239,10 @@ macro expansion time and reuses it later. see [`@dateformat_str`](@ref).
 See [`DateTime`](@ref) and [`format`](@ref) for how to use a DateFormat object to parse and write Date strings
 respectively.
 """
-function DateFormat(f::AbstractString, locale=ENGLISH, default_fields=(1,1,1,0,0,0,0))
+function DateFormat(f::AbstractString, locale::DateLocale=ENGLISH)
     tokens = AbstractDateToken[]
-    localeobj = (isa(locale, AbstractString) ? LOCALES[locale] : locale)::DateLocale
     prev = ()
     prev_offset = 1
-
-    # we store the indices of the token -> order in arguments to DateTime during
-    # construction of the DateFormat. This saves a lot of time while parsing
-    dateorder = (Year, Month, Day, Hour, Minute, Second, Millisecond)
-    order = zeros(Int, length(default_fields))
 
     letters = String(collect(keys(Base.Dates.SLOT_RULE)))
     for m in eachmatch(Regex("(?<!\\\\)([\\Q$letters\\E])\\1*"), f)
@@ -268,11 +256,6 @@ function DateFormat(f::AbstractString, locale=ENGLISH, default_fields=(1,1,1,0,0
                 push!(tokens, DatePart{letter}(width, true))
             else
                 push!(tokens, DatePart{letter}(width, false))
-            end
-
-            idx = findfirst(dateorder, typ)
-            if idx != 0
-                order[idx] = length(tokens)
             end
         end
 
@@ -294,18 +277,17 @@ function DateFormat(f::AbstractString, locale=ENGLISH, default_fields=(1,1,1,0,0
         typ = SLOT_RULE[letter]
 
         push!(tokens, DatePart{letter}(width, false))
-
-        idx = findfirst(dateorder, typ)
-        if idx != 0
-            order[idx] = length(tokens)
-        end
     end
 
     if !isempty(tran)
         push!(tokens, Delim(length(tran) == 1 ? first(tran) : tran))
     end
 
-    return DateFormat((tokens...), localeobj, default_fields, (order...))
+    return DateFormat((tokens...), locale)
+end
+
+function DateFormat(f::AbstractString, locale::AbstractString)
+    DateFormat(f, LOCALES[locale])
 end
 
 function Base.show(io::IO, df::DateFormat)
@@ -344,7 +326,7 @@ This method creates a `DateFormat` object each time it is called. If you are par
 date strings of the same format, consider creating a [`DateFormat`](@ref) object once and using
 that as the second argument instead.
 """
-DateTime(dt::AbstractString, format::AbstractString;locale::AbstractString="english") = parse(DateTime,dt,DateFormat(format,locale))
+DateTime(dt::AbstractString, format::AbstractString; locale=ENGLISH) = parse(DateTime,dt,DateFormat(format,locale))
 
 """
     DateTime(dt::AbstractString, df::DateFormat) -> DateTime
@@ -372,16 +354,14 @@ Parse a date from a date string `dt` using a `DateFormat` object `df`.
 """
 Date(dt::AbstractString,df::DateFormat=ISODateFormat) = parse(Date,dt,df)
 
-format(io, t, dt, locale) = format(io, t, dt)
-
-function format(io, dt::TimeType, fmt::DateFormat)
+function format(io::IO, dt::TimeType, fmt::DateFormat)
     for t in fmt.tokens
         format(io, t, dt, fmt.locale)
     end
 end
 
 function format(dt::TimeType, fmt::DateFormat)
-    sprint(io->format(io, dt, fmt))
+    sprint(io -> format(io, dt, fmt))
 end
 
 
@@ -418,38 +398,38 @@ generate the string "1996-01-15T00:00:00" you could use `format`: "yyyy-mm-ddTHH
 Note that if you need to use a code character as a literal you can use the escape character
 backslash. The string "1996y01m" can be produced with the format "yyyy\\ymm\\m".
 """
-format(dt::TimeType,f::AbstractString;locale="english") = format(dt,DateFormat(f,locale))
+format(dt::TimeType,f::AbstractString;locale=ENGLISH) = format(dt,DateFormat(f,locale))
 
 # show
 
 function Base.show(io::IO, dt::DateTime)
-    if millisecond(dt) == 0
-        format(io, dt, dateformat"YYYY-mm-dd\THH:MM:SS")
+    df = if millisecond(dt) == 0
+        dateformat"YYYY-mm-dd\THH:MM:SS"
     else
-        format(io, dt, dateformat"YYYY-mm-dd\THH:MM:SS.s")
+        dateformat"YYYY-mm-dd\THH:MM:SS.s"
     end
+    format(io, dt, df)
 end
 
-const simple_date = DateFormat("YYYY-mm-dd")
 function Base.show(io::IO, dt::Date)
-    format(io, dt, simple_date)
+    format(io, dt, dateformat"YYYY-mm-dd")
 end
 
 function Base.string(dt::TimeType)
-    sprint(io->show(io, dt))
+    sprint(io -> show(io, dt))
 end
 
 # vectorized
-DateTime{T<:AbstractString}(Y::AbstractArray{T},format::AbstractString;locale::AbstractString="english") = DateTime(Y,DateFormat(format,locale))
+DateTime{T<:AbstractString}(Y::AbstractArray{T},format::AbstractString;locale=ENGLISH) = DateTime(Y,DateFormat(format,locale))
 function DateTime{T<:AbstractString}(Y::AbstractArray{T},df::DateFormat=ISODateTimeFormat)
     return reshape(DateTime[parse(DateTime,y,df) for y in Y], size(Y))
 end
-Date{T<:AbstractString}(Y::AbstractArray{T},format::AbstractString;locale::AbstractString="english") = Date(Y,DateFormat(format,locale))
+Date{T<:AbstractString}(Y::AbstractArray{T},format::AbstractString;locale=ENGLISH) = Date(Y,DateFormat(format,locale))
 function Date{T<:AbstractString}(Y::AbstractArray{T},df::DateFormat=ISODateFormat)
     return reshape(Date[Date(parse(Date,y,df)) for y in Y], size(Y))
 end
 
-format{T<:TimeType}(Y::AbstractArray{T},fmt::AbstractString;locale::AbstractString="english") = format(Y,DateFormat(fmt,locale))
+format{T<:TimeType}(Y::AbstractArray{T},fmt::AbstractString;locale=ENGLISH) = format(Y,DateFormat(fmt,locale))
 function format(Y::AbstractArray{Date},df::DateFormat=ISODateFormat)
     return reshape([format(y,df) for y in Y], size(Y))
 end
