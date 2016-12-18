@@ -381,7 +381,7 @@ end
 
 function serialize(s::AbstractSerializer, g::GlobalRef)
     writetag(s.io, GLOBALREF_TAG)
-    if g.mod === Main && isdefined(g.mod, g.name)
+    if g.mod === Main && isdefined(g.mod, g.name) && isconst(g.mod, g.name)
         v = getfield(g.mod, g.name)
         if isa(v, DataType) && v === v.name.primary && should_send_whole_type(s, v)
             # handle references to types in Main by sending the whole type.
@@ -389,28 +389,13 @@ function serialize(s::AbstractSerializer, g::GlobalRef)
             write(s.io, UInt8(1))
             serialize(s, v)
             return
-        elseif g.name in names(Main, false, false)
-            # FIXME :
-            # 1. There must be a better way to detect if a binding has been imported
-            # into Main or has been primarily defined here.
-            # 2. Handle bindings in Main pointing to bindings in Base, e.g., my_foo=myid.
-            write(s.io, UInt8(2))
-            serialize_global_from_main(s, g)
-            return
         end
     end
-
     write(s.io, UInt8(0))
-    serialize_global_ref(s, g)
-end
-
-function serialize_global_ref(s::AbstractSerializer, g::GlobalRef)
     serialize(s, g.mod)
     serialize(s, g.name)
 end
 
-# default impl only serializes the symbol.
-serialize_global_from_main(s::AbstractSerializer, g::GlobalRef) = serialize_global_ref(s, g)
 
 function serialize(s::AbstractSerializer, t::TypeName)
     serialize_cycle(s, t) && return
@@ -745,19 +730,12 @@ end
 function deserialize(s::AbstractSerializer, ::Type{GlobalRef})
     kind = read(s.io, UInt8)
     if kind == 0
-        return deserialize_global_ref(s)
-    elseif kind == 1
+        return GlobalRef(deserialize(s)::Module, deserialize(s)::Symbol)
+    else
         ty = deserialize(s)
         return GlobalRef(ty.name.module, ty.name.name)
-    else # kind == 2
-        return deserialize_global_from_main(s)
     end
 end
-
-deserialize_global_ref(s::AbstractSerializer) = GlobalRef(deserialize(s)::Module, deserialize(s)::Symbol)
-
-# default impl is same as any global ref, i.e., only the module and symbol.
-deserialize_global_from_main(s::AbstractSerializer) = deserialize_global_ref()
 
 function deserialize(s::AbstractSerializer, ::Type{Union})
     types = deserialize(s)

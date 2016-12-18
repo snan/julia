@@ -1126,11 +1126,20 @@ remotecall_fetch(()->eval(:(f16091a() = 2)), wid)
 f16091b = () -> 1
 remotecall_fetch(()->eval(:(f16091b = () -> 2)), wid)
 @test remotecall_fetch(f16091b, 2) === 1
-
-# FIXME: What is being tested here? Why the difference between named and anonymous functions?
+# Global anonymous functions are over-written...
 @test remotecall_fetch((myid)->remotecall_fetch(f16091b, myid), wid, myid()) === 1
 
-
+# ...while local anonymous functions are by definition, local.
+let
+    f16091c = () -> 1
+    @test remotecall_fetch(f16091c, 2) === 1
+    @test remotecall_fetch((myid)-> begin
+        let
+            f16091c = () -> 2
+            remotecall_fetch(f16091c, myid)
+        end
+    end, wid, myid()) === 2
+end
 
 # issue #16451
 rng=RandomDevice()
@@ -1266,15 +1275,65 @@ test_add_procs_threaded_blas()
 global v1 = 1
 @test remotecall_fetch(()->v1, id_other) == v1
 @test remotecall_fetch(()->isdefined(Main, :v1), id_other) == true
-v1 = 2
-@test remotecall_fetch(()->v1, id_other) == 2
+for i in 2:5
+    global v1 = i
+    @test remotecall_fetch(()->v1, id_other) == i
+end
 
 # non-bitstypes
-global v2 = ones(10)
+global v2 = zeros(10)
 for i in 1:5
     v2[i] = i
     @test remotecall_fetch(()->v2, id_other) == v2
 end
+
+# Test that a global is not being repeatedly serialized when
+# a) referenced multiple times in the closure
+# b) hash value has not changed.
+
+@everywhere begin
+    global testsercnt_d = Dict()
+    type TestSerCnt
+        v
+    end
+    import Base.hash, Base.==
+    hash(x::TestSerCnt, h::UInt) = hash(hash(x.v), h)
+    ==(x1::TestSerCnt, x2::TestSerCnt) = (x1.v == x2.v)
+
+    function Base.serialize(s::AbstractSerializer, t::TestSerCnt)
+        Base.Serializer.serialize_type(s, TestSerCnt)
+        serialize(s, t.v)
+        global testsercnt_d
+        cnt = get!(testsercnt_d, object_id(t), 0)
+        testsercnt_d[object_id(t)] = cnt+1
+    end
+
+    Base.deserialize(s::AbstractSerializer, ::Type{TestSerCnt}) = TestSerCnt(deserialize(s))
+end
+
+# hash value of tsc is not changed
+global tsc = TestSerCnt(zeros(10))
+for i in 1:5
+    remotecall_fetch(()->tsc, id_other)
+end
+# should have been serialized only once
+@test testsercnt_d[object_id(tsc)] == 1
+
+# hash values are changed
+n=5
+testsercnt_d[object_id(tsc)] = 0
+for i in 1:n
+    tsc.v[i] = i
+    remotecall_fetch(()->tsc, id_other)
+end
+# should have been serialized as many times as the loop
+@test testsercnt_d[object_id(tsc)] == n
+
+# Multiple references in a closure should be serialized only once.
+global mrefs = TestSerCnt(ones(10))
+@test remotecall_fetch(()->(mrefs.v, 2*mrefs.v, 3*mrefs.v), id_other) == (ones(10), 2*ones(10), 3*ones(10))
+@test testsercnt_d[object_id(mrefs)] == 1
+
 
 # nested anon functions
 global f1 = x->x
@@ -1288,17 +1347,19 @@ const c1 = ones(10)
 @test remotecall_fetch(()->c1, id_other) == c1
 @test remotecall_fetch(()->isconst(Main, :c1), id_other) == true
 
-# Test same call with local vars
+# Test same calls with local vars
 function wrapped_var_ser_tests()
     # bitstypes
     local lv1 = 1
     @test remotecall_fetch(()->lv1, id_other) == lv1
     @test remotecall_fetch(()->isdefined(Main, :lv1), id_other) == false
-    lv1 = 2
-    @test remotecall_fetch(()->lv1, id_other) == 2
+    for i in 2:5
+        lv1 = i
+        @test remotecall_fetch(()->lv1, id_other) == i
+    end
 
     # non-bitstypes
-    local lv2 = ones(10)
+    local lv2 = zeros(10)
     for i in 1:5
         lv2[i] = i
         @test remotecall_fetch(()->lv2, id_other) == lv2
@@ -1314,21 +1375,34 @@ end
 
 wrapped_var_ser_tests()
 
+# Test internal data structures being cleaned up upon gc.
+global ids_cleanup = ones(6)
+global ids_func = ()->ids_cleanup
+
+clust_ser = (Base.worker_from_id(id_other)).w_serializer
+@test remotecall_fetch(ids_func, id_other) == ids_cleanup
+
+@test haskey(clust_ser.sent_globals, object_id(ids_cleanup))
+finalize(ids_cleanup)
+@test !haskey(clust_ser.sent_globals, object_id(ids_cleanup))
+
+# TODO Add test for cleanup from `clust_ser.glbs_in_tname`
+
 # reported github issues - Mostly tests with globals and various parallel macros
 #2669, #5390
 v2669=10
-@test fetch(@spawn (1+v2669)) == 10
+@test fetch(@spawn (1+v2669)) == 11
 
 #12367
 refs = []
 if true
     n = 10
-    for (idx,p) in enumerate(procs())
-        ref[idx] = @spawnat p begin
+    for p in procs()
+        push!(refs, @spawnat p begin
             @sync for i in 1:n
                 nothing
             end
-        end
+        end)
     end
 end
 foreach(wait, refs)
