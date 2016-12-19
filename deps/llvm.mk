@@ -78,7 +78,11 @@ LLVM_CFLAGS += $(CFLAGS)
 LLVM_CXXFLAGS += $(CXXFLAGS)
 LLVM_CPPFLAGS += $(CPPFLAGS)
 LLVM_LDFLAGS += $(LDFLAGS)
-LLVM_TARGETS := host
+ifeq ($(LLVM_USE_CMAKE),1)
+	LLVM_TARGETS := host;NVPTX
+else
+	LLVM_TARGETS := host,nvptx
+endif
 LLVM_TARGET_FLAGS := --enable-targets=$(LLVM_TARGETS)
 LLVM_CMAKE += -DLLVM_TARGETS_TO_BUILD:STRING="$(LLVM_TARGETS)" -DCMAKE_BUILD_TYPE="$(LLVM_CMAKE_BUILDTYPE)"
 LLVM_CMAKE += -DLLVM_TOOLS_INSTALL_DIR=$(shell $(JULIAHOME)/contrib/relative_path.sh $(build_prefix) $(build_depsbindir))
@@ -490,6 +494,12 @@ $(eval $(call LLVM_PATCH,llvm-3.9.0_threads))
 $(eval $(call LLVM_PATCH,llvm-3.9.0_win64-reloc-dwarf))
 $(eval $(call LLVM_PATCH,llvm-3.9.0_D27296-libssp))
 endif # LLVM_VER
+
+ifeq ($(LLVM_VER_SHORT),3.9)
+$(eval $(call LLVM_PATCH,llvm-D9168_argument_alignment))
+$(eval $(call LLVM_PATCH,llvm-D23597_sdag_names))	# dep for D24300
+$(eval $(call LLVM_PATCH,llvm-D24300_ptx_intrinsics))
+endif
 
 ifeq ($(LLVM_VER),3.7.1)
 ifeq ($(BUILD_LLDB),1)
