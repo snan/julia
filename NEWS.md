@@ -17,6 +17,9 @@ Language changes
     module. For instance, `Base.r"x"` is now parsed as `Base.@r_str "x"`.
     Previously, this syntax parsed as an implicit multiplication. ([#18690])
 
+  * Newly defined methods are no longer callable from the same dynamic runtime
+    scope they were defined in ([#17057]).
+
 Breaking changes
 ----------------
 
@@ -33,6 +36,10 @@ This section lists changes that do not have deprecation warnings.
 
   * `broadcast` now handles tuples, and treats any argument that is not a tuple
     or an array as a "scalar" ([#16986]).
+
+  * The runtime now enforces when new method definitions can take effect ([#17057]).
+    The flip-side of this is that new method definitions should now reliably actually
+    take effect, and be called when evaluating new code ([#265]).
 
 Library improvements
 --------------------
