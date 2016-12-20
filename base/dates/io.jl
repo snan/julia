@@ -25,7 +25,7 @@ end
 """
 Information for parsing and formatting date time values.
 """
-immutable DateFormat{T<:Tuple}
+immutable DateFormat{S,T<:Tuple}
     tokens::T
     locale::DateLocale
 end
@@ -252,11 +252,7 @@ function DateFormat(f::AbstractString, locale::DateLocale=ENGLISH)
             letter, width = prev
             typ = SLOT_RULE[letter]
 
-            if isempty(tran)
-                push!(tokens, DatePart{letter}(width, true))
-            else
-                push!(tokens, DatePart{letter}(width, false))
-            end
+            push!(tokens, DatePart{letter}(width, isempty(tran)))
         end
 
         if !isempty(tran)
@@ -283,7 +279,8 @@ function DateFormat(f::AbstractString, locale::DateLocale=ENGLISH)
         push!(tokens, Delim(length(tran) == 1 ? first(tran) : tran))
     end
 
-    return DateFormat((tokens...), locale)
+    tokens_tuple = (tokens...)
+    return DateFormat{Symbol(f),typeof(tokens_tuple)}(tokens_tuple, locale)
 end
 
 function DateFormat(f::AbstractString, locale::AbstractString)
@@ -311,7 +308,7 @@ macro dateformat_str(str)
 end
 
 # Standard formats
-const ISODateTimeFormat = DateFormat("yyyy-mm-dd\\THH:MM:SS.sss")
+const ISODateTimeFormat = DateFormat("yyyy-mm-dd\\THH:MM:SS.s")
 const ISODateFormat = DateFormat("yyyy-mm-dd")
 const RFC1123Format = DateFormat("e, dd u yyyy HH:MM:SS")
 
