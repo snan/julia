@@ -57,8 +57,10 @@ function unsafe_string(p::Union{Ptr{UInt8},Ptr{Int8}})
     ccall(:jl_cstr_to_string, Ref{String}, (Ptr{UInt8},), p)
 end
 
-#convert(::Type{Vector{UInt8}}, s::AbstractString) = String(s).data
-#convert(::Type{Array{UInt8}}, s::AbstractString) = String(s).data
+# TODO share data?
+convert(::Type{Vector{UInt8}}, s::String) = UInt8[ unsafe_codeunit(s,i) for i=1:s.len ]
+convert(::Type{Vector{UInt8}}, s::AbstractString) = convert(Vector{UInt8}, String(s))
+convert(::Type{Array{UInt8}}, s::AbstractString) = convert(Vector{UInt8}, s)
 convert(::Type{String}, s::AbstractString) = String(s)
 convert(::Type{Vector{Char}}, s::AbstractString) = collect(s)
 convert(::Type{Symbol}, s::AbstractString) = Symbol(s)
@@ -155,10 +157,16 @@ isless(a::AbstractString, b::AbstractString) = cmp(a,b) < 0
 
 # faster comparisons for byte strings and symbols
 
-cmp(a::String, b::String) = lexcmp(a.data, b.data)
+function cmp(a::String, b::String)
+    c = ccall(:memcmp, Int32, (Ptr{UInt8}, Ptr{UInt8}, UInt),
+              a, b, min(a.len,b.len))
+    return c < 0 ? -1 : c > 0 ? +1 : cmp(a.len,b.len)
+end
 cmp(a::Symbol, b::Symbol) = Int(sign(ccall(:strcmp, Int32, (Cstring, Cstring), a, b)))
 
-==(a::String, b::String) = a.data == b.data
+function ==(a::String, b::String)
+    a.len == b.len && 0 == ccall(:memcmp, Int32, (Ptr{UInt8}, Ptr{UInt8}, UInt), a, b, a.len)
+end
 isless(a::Symbol, b::Symbol) = cmp(a,b) < 0
 
 ## Generic validation functions ##
@@ -190,12 +198,12 @@ nextind(s::AbstractArray    , i::Integer) = Int(i)+1
 
 function prevind(s::String, i::Integer)
     j = Int(i)
-    e = endof(s.data)
+    e = s.len
     if j > e
         return endof(s)
     end
     j -= 1
-    while j > 0 && is_valid_continuation(s.data[j])
+    while j > 0 && is_valid_continuation(unsafe_codeunit(s,j))
         j -= 1
     end
     j
@@ -206,9 +214,9 @@ function nextind(s::String, i::Integer)
     if j < 1
         return 1
     end
-    e = endof(s.data)
+    e = s.len
     j += 1
-    while j <= e && is_valid_continuation(s.data[j])
+    while j <= e && is_valid_continuation(unsafe_codeunit(s,j))
         j += 1
     end
     j
@@ -368,7 +376,8 @@ isxdigit(s::AbstractString) = all(isxdigit, s)
 
 byte_string_classify(data::Vector{UInt8}) =
     ccall(:u8_isvalid, Int32, (Ptr{UInt8}, Int), data, length(data))
-byte_string_classify(s::String) = byte_string_classify(s.data)
+byte_string_classify(s::String) =
+    ccall(:u8_isvalid, Int32, (Ptr{UInt8}, Int), s, s.len)
     # 0: neither valid ASCII nor UTF-8
     # 1: valid ASCII
     # 2: valid UTF-8

@@ -43,7 +43,7 @@ search(s::AbstractString, c::Chars) = search(s,c,start(s))
 
 in(c::Char, s::AbstractString) = (search(s,c)!=0)
 
-function _searchindex(s, t, i)
+function _searchindex(s::AbstractString, t::AbstractString, i)
     if isempty(t)
         return 1 <= i <= nextind(s,endof(s)) ? i :
                throw(BoundsError(s, i))
@@ -315,7 +315,7 @@ function rsearchindex(s::String, t::String)
     if endof(t) == 1
         rsearch(s, t[1])
     else
-        _rsearchindex(s.data, t.data, length(s.data))
+        _rsearchindex(s.data, t.data, sizeof(s))
     end
 end
 
@@ -366,49 +366,3 @@ true
 contains(haystack::AbstractString, needle::AbstractString) = searchindex(haystack,needle)!=0
 
 in(::AbstractString, ::AbstractString) = error("use contains(x,y) for string containment")
-
-# ByteArray optimizations
-
-# find the index of the first occurrence of a value in a byte array
-
-function search(a::ByteArray, b::Union{Int8,UInt8}, i::Integer)
-    if i < 1
-        throw(BoundsError(a, i))
-    end
-    n = length(a)
-    if i > n
-        return i == n+1 ? 0 : throw(BoundsError(a, i))
-    end
-    p = pointer(a)
-    q = ccall(:memchr, Ptr{UInt8}, (Ptr{UInt8}, Int32, Csize_t), p+i-1, b, n-i+1)
-    q == C_NULL ? 0 : Int(q-p+1)
-end
-function search(a::ByteArray, b::Char, i::Integer)
-    if isascii(b)
-        search(a,UInt8(b),i)
-    else
-        search(a,string(b).data,i).start
-    end
-end
-search(a::ByteArray, b::Union{Int8,UInt8,Char}) = search(a,b,1)
-
-function rsearch(a::ByteArray, b::Union{Int8,UInt8}, i::Integer)
-    if i < 1
-        return i == 0 ? 0 : throw(BoundsError(a, i))
-    end
-    n = length(a)
-    if i > n
-        return i == n+1 ? 0 : throw(BoundsError(a, i))
-    end
-    p = pointer(a)
-    q = ccall(:memrchr, Ptr{UInt8}, (Ptr{UInt8}, Int32, Csize_t), p, b, i)
-    q == C_NULL ? 0 : Int(q-p+1)
-end
-function rsearch(a::ByteArray, b::Char, i::Integer)
-    if isascii(b)
-        rsearch(a,UInt8(b),i)
-    else
-        rsearch(a,string(b).data,i).start
-    end
-end
-rsearch(a::ByteArray, b::Union{Int8,UInt8,Char}) = rsearch(a,b,length(a))

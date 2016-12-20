@@ -374,9 +374,16 @@ JL_DLLEXPORT jl_value_t *jl_array_to_string(jl_array_t *a)
 
 JL_DLLEXPORT jl_value_t *jl_pchar_to_string(const char *str, size_t len)
 {
-    jl_value_t *s = jl_gc_allocobj(jl_get_ptls_states(), sizeof(void*)+len, jl_string_type);
+    jl_value_t *s = jl_gc_allocobj(jl_get_ptls_states(), sizeof(size_t)+len, jl_string_type);
     *(size_t*)s = len;
-    memcpy((char*)s + sizeof(void*), str, len);
+    memcpy((char*)s + sizeof(size_t), str, len);
+    return s;
+}
+
+JL_DLLEXPORT jl_value_t *jl_alloc_string(size_t len)
+{
+    jl_value_t *s = jl_gc_allocobj(jl_get_ptls_states(), sizeof(size_t)+len, jl_string_type);
+    *(size_t*)s = len;
     return s;
 }
 

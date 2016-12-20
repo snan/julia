@@ -33,6 +33,17 @@ const utf8_trailing = [
 
 ## required core functionality ##
 
+@inline unsafe_codeunit(s::String, i::Integer) = unsafe_load(pointer(s),i)
+
+function codeunit(s::String, i::Integer)
+    if i < 1 || i > s.len
+        throw(BoundsError(s,i))
+    end
+    unsafe_codeunit(s, i)
+end
+
+bytes(s::String) = (unsafe_codeunit(s,i) for i in 1:s.len)
+
 function endof(s::String)
     p = pointer(s)
     i = s.len
@@ -114,91 +125,150 @@ const empty_utf8 = String(UInt8[])
 function getindex(s::String, r::UnitRange{Int})
     isempty(r) && return empty_utf8
     i, j = first(r), last(r)
-    d = s.data
-    if i < 1 || i > length(s.data)
+    l = s.len
+    if i < 1 || i > l
         throw(BoundsError(s, i))
     end
-    if is_valid_continuation(d[i])
-        throw(UnicodeError(UTF_ERR_INVALID_INDEX, i, d[i]))
+    if is_valid_continuation(unsafe_codeunit(s,i))
+        throw(UnicodeError(UTF_ERR_INVALID_INDEX, i, unsafe_codeunit(s,i)))
     end
-    if j > length(d)
+    if j > l
         throw(BoundsError())
     end
     j = nextind(s,j)-1
-    String(d[i:j])
+    String(pointer(s,i), j-i+1)
 end
 
-function search(s::String, c::Char, i::Integer)
+function search(s::String, c::Char, i::Integer = 1)
     if i < 1 || i > sizeof(s)
         i == sizeof(s) + 1 && return 0
         throw(BoundsError(s, i))
     end
-    d = s.data
-    if is_valid_continuation(d[i])
-        throw(UnicodeError(UTF_ERR_INVALID_INDEX, i, d[i]))
+    if is_valid_continuation(codeunit(s,i))
+        throw(UnicodeError(UTF_ERR_INVALID_INDEX, i, codeunit(s,i)))
     end
-    c < Char(0x80) && return search(d, c%UInt8, i)
+    c < Char(0x80) && return search(s, c%UInt8, i)
     while true
-        i = search(d, first_utf8_byte(c), i)
+        i = search(s, first_utf8_byte(c), i)
         (i==0 || s[i] == c) && return i
         i = next(s,i)[2]
     end
 end
 
-function rsearch(s::String, c::Char, i::Integer)
-    c < Char(0x80) && return rsearch(s.data, c%UInt8, i)
+function search(a::String, b::Union{Int8,UInt8}, i::Integer = 1)
+    if i < 1
+        throw(BoundsError(a, i))
+    end
+    n = a.len
+    if i > n
+        return i == n+1 ? 0 : throw(BoundsError(a, i))
+    end
+    p = pointer(a)
+    q = ccall(:memchr, Ptr{UInt8}, (Ptr{UInt8}, Int32, Csize_t), p+i-1, b, n-i+1)
+    q == C_NULL ? 0 : Int(q-p+1)
+end
+
+function rsearch(s::String, c::Char, i::Integer = s.len)
+    c < Char(0x80) && return rsearch(s, c%UInt8, i)
     b = first_utf8_byte(c)
     while true
-        i = rsearch(s.data, b, i)
+        i = rsearch(s, b, i)
         (i==0 || s[i] == c) && return i
         i = prevind(s,i)
     end
+end
+
+function rsearch(a::String, b::Union{Int8,UInt8}, i::Integer = s.len)
+    if i < 1
+        return i == 0 ? 0 : throw(BoundsError(a, i))
+    end
+    n = a.len
+    if i > n
+        return i == n+1 ? 0 : throw(BoundsError(a, i))
+    end
+    p = pointer(a)
+    q = ccall(:memrchr, Ptr{UInt8}, (Ptr{UInt8}, Int32, Csize_t), p, b, i)
+    q == C_NULL ? 0 : Int(q-p+1)
 end
 
 function string(a::String...)
     if length(a) == 1
         return a[1]::String
     end
-    # ^^ at least one must be UTF-8 or the ASCII-only method would get called
-    data = Array{UInt8}(0)
-    for d in a
-        append!(data,d.data)
+    n = 0
+    for str in a
+        n += str.len
     end
-    String(data)
+    out = ccall(:jl_alloc_string, Ref{String}, (Csize_t,), n)
+    offs = 1
+    for str in a
+        unsafe_copy!(pointer(out,offs), pointer(str), str.len)
+        offs += str.len
+    end
+    return out
+end
+
+# UTF-8 encoding length of a character
+function codelen(d::Char)
+    c = UInt32(d::Char)
+    if c < 0x80
+        return 1
+    elseif c < 0x800
+        return 2
+    elseif c < 0x10000
+        return 3
+    elseif c < 0x110000
+        return 4
+    end
+    return 3  # '\ufffd'
 end
 
 function string(a::Union{String,Char}...)
-    s = Array{UInt8}(0)
+    n = 0
+    for d in a
+        if isa(d,Char)
+            n += codelen(d::Char)
+        else
+            n += (d::String).len
+        end
+    end
+    out = ccall(:jl_alloc_string, Ref{String}, (Csize_t,), n)
+    offs = 1
+    p = pointer(out)
     for d in a
         if isa(d,Char)
             c = UInt32(d::Char)
             if c < 0x80
-                push!(s, c%UInt8)
+                unsafe_store!(p, offs, c%UInt8); offs += 1
             elseif c < 0x800
-                push!(s, (( c >> 6          ) | 0xC0)%UInt8)
-                push!(s, (( c        & 0x3F ) | 0x80)%UInt8)
+                unsafe_store!(p, offs, (( c >> 6          ) | 0xC0)%UInt8); offs += 1
+                unsafe_store!(p, offs, (( c        & 0x3F ) | 0x80)%UInt8); offs += 1
             elseif c < 0x10000
-                push!(s, (( c >> 12         ) | 0xE0)%UInt8)
-                push!(s, (((c >> 6)  & 0x3F ) | 0x80)%UInt8)
-                push!(s, (( c        & 0x3F ) | 0x80)%UInt8)
+                unsafe_store!(p, offs, (( c >> 12         ) | 0xE0)%UInt8); offs += 1
+                unsafe_store!(p, offs, (((c >> 6)  & 0x3F ) | 0x80)%UInt8); offs += 1
+                unsafe_store!(p, offs, (( c        & 0x3F ) | 0x80)%UInt8); offs += 1
             elseif c < 0x110000
-                push!(s, (( c >> 18         ) | 0xF0)%UInt8)
-                push!(s, (((c >> 12) & 0x3F ) | 0x80)%UInt8)
-                push!(s, (((c >> 6)  & 0x3F ) | 0x80)%UInt8)
-                push!(s, (( c        & 0x3F ) | 0x80)%UInt8)
+                unsafe_store!(p, offs, (( c >> 18         ) | 0xF0)%UInt8); offs += 1
+                unsafe_store!(p, offs, (((c >> 12) & 0x3F ) | 0x80)%UInt8); offs += 1
+                unsafe_store!(p, offs, (((c >> 6)  & 0x3F ) | 0x80)%UInt8); offs += 1
+                unsafe_store!(p, offs, (( c        & 0x3F ) | 0x80)%UInt8); offs += 1
             else
                 # '\ufffd'
-                push!(s, 0xef); push!(s, 0xbf); push!(s, 0xbd)
+                unsafe_store!(p, offs, 0xef); offs += 1
+                unsafe_store!(p, offs, 0xbf); offs += 1
+                unsafe_store!(p, offs, 0xbd); offs += 1
             end
         else
-            append!(s,(d::String).data)
+            l = (d::String).len
+            unsafe_copy!(pointer(out,offs), pointer(d::String), l)
+            offs += l
         end
     end
-    String(s)
+    return out
 end
 
 function reverse(s::String)
-    dat = s.data
+    dat = convert(Vector{UInt8},s)
     n = length(dat)
     n <= 1 && return s
     buf = Vector{UInt8}(n)
